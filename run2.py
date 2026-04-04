@@ -95,24 +95,27 @@ def analyze_gold_attention(result, save_path="plot2/gold_attention_plot.png"):
 
 
 def get_query_span(inputs, prompt, question, tokenizer, putils):
-    """
-    Compute the token span of the query part in the full prompt.
-    Uses character‑wise alignment as a simple heuristic.
-    """
     ip_ids = inputs.input_ids[0]  # [N]
-    query_section = f"Query: {question}\\nCorrect tool_id:"
 
-    # 1. Find character span of query_section in the full prompt
+    # Exactly the same as in create_prompt:
+    # `f"Query: {query}\\nCorrect tool_id:"`
+    query_section = f"Query: {question}\\\\nCorrect tool_id:"
+
     q_start_char = prompt.find(query_section)
-    q_end_char = q_start_char + len(query_section)
     if q_start_char == -1:
+        print("Prompt (first 300 chars):")
+        print(prompt[:300])
+        print("Prompt (last 300 chars):")
+        print(prompt[-300:])
+        print("Expected query_section:", repr(query_section))
         raise ValueError("query section not found in prompt")
 
-    # 2. map char indices to token indices by scanning tokens
+    q_end_char = q_start_char + len(query_section)
+
+    offset = 0
     q_start_tok = 0
     q_end_tok = len(ip_ids)
 
-    offset = 0
     for i, token_id in enumerate(ip_ids):
         txt = tokenizer.decode([token_id])
         t_start = offset
