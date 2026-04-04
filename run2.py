@@ -165,54 +165,70 @@ def analyze_gold_attention(result, save_path="plot2/gold_attention_plot.png"):
 def get_query_span(input_ids, tokenizer, query_text):
     """
     Identify the token span corresponding to the query in the prompt.
-    Searches for "Query: " prefix, then finds the end before "Correct tool_id:".
+    Uses string-based search on decoded text, then maps back to token positions.
     """
-    # Tokenize the markers
-    query_prefix = "Query:"
-    query_suffix = "Correct tool_id:"
-    
-    query_prefix_ids = tokenizer(query_prefix, add_special_tokens=False).input_ids
-    query_suffix_ids = tokenizer(query_suffix, add_special_tokens=False).input_ids
-    
     ids_list = input_ids.tolist()
     n = len(ids_list)
     
-    # Find "Query:" in the token stream
-    query_prefix_len = len(query_prefix_ids)
-    query_start = None
+    # Decode the entire sequence to find structural markers
+    full_text = tokenizer.decode(ids_list)
     
-    for i in range(n - query_prefix_len + 1):
-        if ids_list[i : i + query_prefix_len] == query_prefix_ids:
-            # Found "Query:", start from the next token
-            query_start = i + query_prefix_len
-            break
+    # Find the positions of key markers in the decoded text
+    query_marker_pos = full_text.find("Query:")
+    suffix_marker_pos = full_text.find("Correct tool_id:")
     
-    if query_start is None:
-        print(f"DEBUG: Could not find 'Query:' marker in input")
+    if query_marker_pos == -1:
+        print(f"DEBUG: 'Query:' not found in decoded text")
         return (0, 0)
     
-    # Find "Correct tool_id:" to identify where query ends
-    query_suffix_len = len(query_suffix_ids)
-    query_end = None
+    # Start from after "Query:"
+    query_start_pos = query_marker_pos + len("Query:")
     
-    for i in range(query_start, n - query_suffix_len + 1):
-        if ids_list[i : i + query_suffix_len] == query_suffix_ids:
-            query_end = i
-            break
+    # Determine query end position
+    if suffix_marker_pos != -1:
+        query_end_pos = suffix_marker_pos
+    else:
+        query_end_pos = len(full_text)
     
-    if query_end is None:
-        # Fallback: assume query goes to end of sequence
-        query_end = n
+    # Extract query substring and strip whitespace
+    query_substring = full_text[query_start_pos:query_end_pos].strip()
     
-    # Skip leading spaces/newlines at the start of the query
-    while query_start < query_end and ids_list[query_start] in [tokenizer.encode(" ")[0], tokenizer.encode("\n")[0], tokenizer.encode(" \n")[0]]:
-        query_start += 1
+    if not query_substring:
+        print(f"DEBUG: Query substring is empty")
+        return (0, 0)
     
-    # Skip trailing spaces/newlines at the end of the query
-    while query_end > query_start and ids_list[query_end - 1] in [tokenizer.encode(" ")[0], tokenizer.encode("\n")[0], tokenizer.encode(" \n")[0]]:
-        query_end -= 1
+    # Now find the token span for this text using character-to-token mapping
+    # Re-encode the prefix + query to get token boundaries
+    prefix = full_text[:query_start_pos].strip()
     
-    return (query_start, query_end) if query_start < query_end else (0, 0)
+    # Tokenize prefix and get its length
+    prefix_ids = tokenizer(prefix, add_special_tokens=False).input_ids
+    prefix_len = len(prefix_ids)
+    
+    # Tokenize the query substring
+    query_ids = tokenizer(query_substring, add_special_tokens=False).input_ids
+    query_len = len(query_ids)
+    
+    if query_len == 0:
+        print(f"DEBUG: Query tokenized to 0 tokens")
+        return (0, 0)
+    
+    # The query span starts after the prefix
+    # We need to account for potential tokenization differences
+    # So let's search for a match in the actual token sequence
+    for i in range(n - query_len + 1):
+        if ids_list[i : i + query_len] == query_ids:
+            return (i, i + query_len)
+    
+    # If exact match fails, at least try to use the prefix-based approach
+    # (this can be approximate but better than (0,0))
+    estimated_start = prefix_len
+    estimated_end = min(estimated_start + query_len + 2, n)  # Add buffer for padding
+    
+    if estimated_start < estimated_end:
+        return (estimated_start, estimated_end)
+    
+    return (0, 0)
     
     
 
