@@ -35,11 +35,6 @@ def query_to_docs_attention(attentions, query_span, doc_spans):
     attentions: tuple(num_layers) of [1, heads, N, N]
     query_span: (start, end)
     doc_spans: list of (start, end)
-
-    Returns doc_scores: tensor of shape [num_docs]
-        - For each document, compute the mean attention from query tokens
-          to that document's tokens, averaged over all layers and heads,
-          then normalised by document token length.
     """
     device = attentions[0].device
     doc_scores = torch.zeros(len(doc_spans), device=device)
@@ -48,9 +43,6 @@ def query_to_docs_attention(attentions, query_span, doc_spans):
     query_start, query_end = query_span
     num_layers = len(attentions)
 
-    # Average over heads first -> [q_len, N], then sum query->doc attention
-    # weights, then normalise by doc length so longer tools don't get an
-    # unfair score boost.
     doc_lengths = torch.tensor(
         [max(end - start, 1) for start, end in doc_spans],
         dtype=torch.float32,
@@ -72,26 +64,12 @@ def query_to_docs_attention(attentions, query_span, doc_spans):
 
 def analyze_gold_attention(result, save_path="plot2/gold_attention_plot.png"):
     # TODO 2: visualize graph
-    """
-    input -> result: list of dicts with keys:
-                        - gold_position  (int: 0-indexed position of correct tool)
-                        - gold_score     (float: attention score for correct tool)
-                        - gold_rank      (int: rank of correct tool, 0 = top)
-    GOAL: Using the results data, generate a visualization that shows how
-    attention to the gold tool varies with its position in the prompt.
-
-    Requirements:
-        - The plot should clearly illustrate whether position affects attention.
-        - Save the plot as an image file under folder plot2.
-        - You are free to choose how to aggregate and visualize the data.
-    """
     df = pd.DataFrame(result)
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
     df["gold_position"] = df["gold_position"].astype(int)
     df["gold_score"]    = df["gold_score"].astype(float)
 
-    # Calculate both mean AND standard deviation per position bucket
     grouped = (
         df.groupby("gold_position")["gold_score"]
         .agg(["mean", "std"])
@@ -100,44 +78,27 @@ def analyze_gold_attention(result, save_path="plot2/gold_attention_plot.png"):
     grouped["std"] = grouped["std"].fillna(0)
 
     plt.figure(figsize=(10, 6))
-
-    # Subtle background grid
     plt.grid(True, linestyle="--", alpha=0.4, zorder=0)
 
-    # Scatter individual query scores with jitter to reduce overplotting
     jitter = np.random.normal(0, 0.1, size=len(df))
     plt.scatter(
         df["gold_position"] + jitter,
         df["gold_score"],
-        alpha=0.15,
-        s=15,
-        color="steelblue",
-        label="Per-query gold score",
-        zorder=1,
+        alpha=0.15, s=15, color="steelblue",
+        label="Per-query gold score", zorder=1,
     )
 
-    # Standard deviation band around the mean (floor at 0)
     lower_bound = np.clip(grouped["mean"] - grouped["std"], a_min=0, a_max=None)
     upper_bound = grouped["mean"] + grouped["std"]
     plt.fill_between(
-        grouped["gold_position"],
-        lower_bound,
-        upper_bound,
-        color="crimson",
-        alpha=0.2,
-        label="+/-1 Std Dev",
-        zorder=2,
+        grouped["gold_position"], lower_bound, upper_bound,
+        color="crimson", alpha=0.2, label="+/-1 Std Dev", zorder=2,
     )
 
-    # Mean line with markers at each discrete position
     plt.plot(
-        grouped["gold_position"],
-        grouped["mean"],
-        color="crimson",
-        linewidth=2.5,
-        marker="o",
-        label="Mean gold score",
-        zorder=3,
+        grouped["gold_position"], grouped["mean"],
+        color="crimson", linewidth=2.5, marker="o",
+        label="Mean gold score", zorder=3,
     )
 
     plt.xlabel("Gold Tool Position in Prompt", fontsize=12, fontweight="bold", labelpad=10)
@@ -145,7 +106,6 @@ def analyze_gold_attention(result, save_path="plot2/gold_attention_plot.png"):
     plt.title("Gold Tool Attention vs. Prompt Position\n(Lost-in-the-Middle Analysis)",
               fontsize=14, pad=15)
 
-    # Dynamic y-axis limits
     max_score = df["gold_score"].max()
     min_score = df["gold_score"].min()
     y_pad     = (max_score - min_score) * 0.1 if max_score > min_score else max_score * 0.1
@@ -164,64 +124,56 @@ def analyze_gold_attention(result, save_path="plot2/gold_attention_plot.png"):
 def get_query_span(input_ids, tokenizer, query_text):
     """
     Identify the token span corresponding to the query in the prompt.
-    Uses string-based search on decoded text, then maps back to token positions.
+
+    ROOT CAUSE FIX: tokenizer.decode() on Llama-3 prompts returns '<unk>'
+    because the prompt contains special tokens (like <|start_header_id|>)
+    that decode incorrectly. So we NEVER call tokenizer.decode().
+
+    Instead we directly tokenize the known strings we are looking for and
+    do a sliding-window search over the raw token id sequence.
+
+    The prompt always ends with:
+        ... "Query: {query_text}\nCorrect tool_id:" <asst_header_tokens>
+
+    So we search for the token ids of "Query: {query_text}" directly.
     """
     ids_list = input_ids.tolist()
     n = len(ids_list)
-    
-    # Decode the entire sequence to find structural markers
-    full_text = tokenizer.decode(ids_list)
-    
-    # Find the positions of key markers in the decoded text
-    query_marker_pos  = full_text.find("Query:")
-    suffix_marker_pos = full_text.find("Correct tool_id:")
-    
-    if query_marker_pos == -1:
-        print(f"DEBUG: 'Query:' not found in decoded text")
-        return (0, 0)
-    
-    # Start from after "Query:"
-    query_start_pos = query_marker_pos + len("Query:")
-    
-    # Determine query end position
-    if suffix_marker_pos != -1:
-        query_end_pos = suffix_marker_pos
-    else:
-        query_end_pos = len(full_text)
-    
-    # Extract query substring and strip whitespace
-    query_substring = full_text[query_start_pos:query_end_pos].strip()
-    
-    if not query_substring:
-        print(f"DEBUG: Query substring is empty")
-        return (0, 0)
-    
-    # Find the token span for this text using character-to-token mapping
-    prefix     = full_text[:query_start_pos].strip()
-    prefix_ids = tokenizer(prefix, add_special_tokens=False).input_ids
-    prefix_len = len(prefix_ids)
-    query_ids  = tokenizer(query_substring, add_special_tokens=False).input_ids
-    query_len  = len(query_ids)
-    
-    if query_len == 0:
-        print(f"DEBUG: Query tokenized to 0 tokens")
-        return (0, 0)
-    
-    # Search for exact match in the token sequence
-    for i in range(n - query_len + 1):
-        if ids_list[i : i + query_len] == query_ids:
-            return (i, i + query_len)
-    
-    # Fallback: approximate position using prefix length
-    estimated_start = prefix_len
-    estimated_end   = min(estimated_start + query_len + 2, n)
-    
-    if estimated_start < estimated_end:
-        return (estimated_start, estimated_end)
-    
+
+    # ── Strategy 1: search for "Query: {query_text}" token ids ──────────────
+    query_prefix_str = f"Query: {query_text}"
+    query_prefix_ids = tokenizer(query_prefix_str, add_special_tokens=False).input_ids
+    qp_len = len(query_prefix_ids)
+
+    if qp_len > 0:
+        for i in range(n - qp_len + 1):
+            if ids_list[i: i + qp_len] == query_prefix_ids:
+                return (i, i + qp_len)
+
+    # ── Strategy 2: search for just the query text alone ────────────────────
+    query_only_ids = tokenizer(query_text, add_special_tokens=False).input_ids
+    qo_len = len(query_only_ids)
+
+    if qo_len > 0:
+        for i in range(n - qo_len + 1):
+            if ids_list[i: i + qo_len] == query_only_ids:
+                return (i, i + qo_len)
+
+    # ── Strategy 3: search for "Query:" token ids, then take next qo_len ────
+    query_label_ids = tokenizer("Query:", add_special_tokens=False).input_ids
+    ql_len = len(query_label_ids)
+
+    for i in range(n - ql_len + 1):
+        if ids_list[i: i + ql_len] == query_label_ids:
+            end = min(i + ql_len + max(qo_len, 1), n)
+            return (i, end)
+
+    # ── Strategy 4: last resort – tail of sequence ──────────────────────────
+    if qo_len > 0:
+        return (max(0, n - qo_len), n)
+
     return (0, 0)
-    
-    
+
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--seed',      type=int,  default=64)
@@ -247,7 +199,6 @@ if __name__ == '__main__':
     softmax_scaling      = d ** -0.5
 
     train_queries, test_queries, tools = get_queries_and_items()
- 
 
     print("---- debug print start ----")
     print(f"seed: {args.seed}, model: {model_name}")
@@ -259,7 +210,6 @@ if __name__ == '__main__':
     start_time  = time.time()
     results     = []
 
-    # Counters initialised OUTSIDE the loop
     correct_at_1 = 0
     correct_at_5 = 0
     total        = 0
@@ -297,26 +247,25 @@ if __name__ == '__main__':
 
         if args.debug and qix < 1:
             print("====== PROMPT DEBUG ======")
-            print("RAW PROMPT:")
-            print(repr(prompt[:500]))  # Show first 500 chars
-            print("\nDECODED TOKENS:")
-            decoded = tokenizer.decode(inputs.input_ids[0].cpu())
-            print(repr(decoded[:500]))
+            print("RAW PROMPT (first 500 chars):")
+            print(repr(prompt[:500]))
+            print("\nFIRST 30 TOKEN IDS:")
+            print(inputs.input_ids[0][:30].tolist())
+            print("\n'Query: <question>' tokenized:")
+            test_ids = tokenizer(f"Query: {question}", add_special_tokens=False).input_ids
+            print(test_ids[:20])
             print("====== END DEBUG =======")
-
 
         with torch.no_grad():
             outputs    = model(**inputs)
             attentions = outputs.attentions
             
-            # Validate attentions were returned
             if attentions is None:
                 print(f"ERROR: Model did not return attentions for query {qix}")
-                print(f"  Model config output_attentions: {model.config.output_attentions}")
                 continue
             '''
                 attentions - tuple of length = # layers
-                attentions[0].shape - [1, h, N, N] : first layer's attention matrix for h heads
+                attentions[0].shape - [1, h, N, N]
             '''
         
         query_span = get_query_span(
@@ -325,23 +274,13 @@ if __name__ == '__main__':
             query_text=question,
         )
 
-        # Check if query_span is valid
-        if query_span == (0, 0):
+        if query_span == (0, 0) or query_span[0] >= query_span[1]:
             print(f"WARNING: Query span not found for query: {question[:50]}")
-            continue
-        
-        # Ensure span contains at least one token
-        if query_span[0] >= query_span[1]:
-            print(f"WARNING: Invalid query span {query_span} for query: {question[:50]}")
+            del attentions
+            torch.cuda.empty_cache()
             continue
 
         doc_scores = query_to_docs_attention(attentions, query_span, item_spans)
-        
-        # Check if all scores are effectively zero
-        if doc_scores.max().item() < 1e-6:
-            if qix < 10:
-                print(f"WARNING: Query {qix} has all-zero attention scores. Span: {query_span}")
-                print(f"  Query tokens: {tokenizer.decode(inputs.input_ids[0][query_span[0]:query_span[1]])}")
         
         ranked_docs = torch.argsort(doc_scores, descending=True)
         gold_rank   = (ranked_docs == gold_tool_id).nonzero(as_tuple=True)[0].item()
@@ -363,7 +302,6 @@ if __name__ == '__main__':
         del attentions
         torch.cuda.empty_cache()
 
-    # Print recall once after the loop completes
     recall_at_1 = correct_at_1 / total
     recall_at_5 = correct_at_5 / total
     print(f"Recall@1: {recall_at_1:.4f}")
