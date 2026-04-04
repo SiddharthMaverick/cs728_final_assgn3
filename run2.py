@@ -158,11 +158,17 @@ if __name__ == '__main__':
     num_key_value_groups = num_heads//model.config.num_key_value_heads
     softmax_scaling=d**-0.5
     train_queries, test_queries, tools = get_queries_and_items()
- 
-
-    print("---- debug print start ----")
-    print(f"seed: {args.seed}, model: {model_name}")
-    print("model.config._attn_implementation: ", model.config._attn_implementation)
+    
+    print("\n" + "="*70)
+    print("[MODEL & DATA LOADED]")
+    print("="*70)
+    print(f"Model: {model_name}")
+    print(f"Device: {device}")
+    print(f"Model Config: {num_layers} layers, {num_heads} heads, head_dim={d}")
+    print(f"Attention Implementation: {model.config._attn_implementation}")
+    print(f"Total test queries: {len(test_queries)}")
+    print(f"Total tools available: {len(tools)}")
+    print("="*70 + "\n")
 
     dict_head_freq = {}
     df_data = []
@@ -173,6 +179,9 @@ if __name__ == '__main__':
     correct_at_1 = 0
     correct_at_5 = 0
     total = 0
+    
+    print("[STARTING] Processing test queries...\n")
+    
     for qix in tqdm(range(len(test_queries))):
         sample =  test_queries[qix]
         qid = sample["qid"]
@@ -228,6 +237,11 @@ if __name__ == '__main__':
 
         doc_scores = query_to_docs_attention(attentions, query_span, item_spans)
 
+        # Verify doc_scores are reasonable
+        if args.debug and qix < 3:
+            print(f"  [QIX {qix}] doc_scores range: [{doc_scores.min():.4f}, {doc_scores.max():.4f}]")
+            print(f"  [QIX {qix}] gold_tool_id: {gold_tool_id}, total tools: {len(item_spans)}")
+
         # TODO: find gold_rank- rank of gold tool in doc_scores
         # TODO: find gold_score - score of gold tool
         # Rank all docs by score (descending)
@@ -236,6 +250,9 @@ if __name__ == '__main__':
         # Rank of the gold tool (0-indexed)
         gold_rank  = (ranked_docs == gold_tool_id).nonzero(as_tuple=True)[0].item()
         gold_score = doc_scores[gold_tool_id].item()
+        
+        if args.debug and qix < 3:
+            print(f"  [QIX {qix}] gold_rank: {gold_rank}, gold_score: {gold_score:.6f}")
 
         results.append({
             "qid": qid,
@@ -250,15 +267,33 @@ if __name__ == '__main__':
         if gold_rank < 5:
             correct_at_5 += 1
         total += 1
+        
+        # Print progress every 500 queries
+        if (qix + 1) % 500 == 0:
+            running_r1 = correct_at_1 / total
+            running_r5 = correct_at_5 / total
+            print(f"[Progress] Processed {qix + 1}/{len(test_queries)} - Running Recall@1: {running_r1:.4f}, Recall@5: {running_r5:.4f}")
 
         del attentions
         torch.cuda.empty_cache()
 
     recall_at_1 = correct_at_1 / total
     recall_at_5 = correct_at_5 / total
-    print(f"Recall@1: {recall_at_1:.4f}, Recall@5: {recall_at_5:.4f}")
-
+    
+    print("\n" + "="*70)
+    print("[FINAL RESULTS]")
+    print("="*70)
+    print(f"Total Queries Processed: {total}")
+    print(f"Recall@1: {recall_at_1:.4f} ({correct_at_1}/{total})")
+    print(f"Recall@5: {recall_at_5:.4f} ({correct_at_5}/{total})")
+    print("="*70)
+    
+    print("\n[GENERATING] Attention visualization plot...")
     analyze_gold_attention(results)
+    
+    print("\n" + "="*70)
+    print("[COMPLETED] All processing done!")
+    print("="*70)
 
 
     
