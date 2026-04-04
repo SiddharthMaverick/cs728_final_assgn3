@@ -95,6 +95,10 @@ def analyze_gold_attention(result, save_path="plot2/gold_attention_plot.png"):
         std_score_per_pos.append(scores[mask].std())
         mean_rank_per_pos.append(ranks[mask].mean())
         
+        
+    mean_score_per_pos = np.array(mean_score_per_pos)
+    std_score_per_pos = np.array(std_score_per_pos)
+    mean_rank_per_pos = np.array(mean_rank_per_pos)
     fig,axes=plt.subplots(1,3, figsize=(18,5))
     fig.suptitle("Attention and Rank of Gold Tool vs Position in Prompt", fontsize=14)
     
