@@ -165,41 +165,54 @@ def analyze_gold_attention(result, save_path="plot2/gold_attention_plot.png"):
 def get_query_span(input_ids, tokenizer, query_text):
     """
     Identify the token span corresponding to the query in the prompt.
-    Searches for the sub-sequence "Query: <query_text>" in the token
-    stream and returns (start, end)  [end is exclusive].
+    Searches for "Query: " prefix, then finds the end before "Correct tool_id:".
     """
-    # Try tokenizing with add_special_tokens=False first
-    query_marker = f"Query: {query_text}"
-    marker_ids   = tokenizer(query_marker, add_special_tokens=False, add_prefix_space=False).input_ids
-    marker_len   = len(marker_ids)
-    ids_list     = input_ids.tolist()
-    n            = len(ids_list)
-
-    # Search for exact match
-    for i in range(n - marker_len + 1):
-        if ids_list[i : i + marker_len] == marker_ids:
-            return (i, i + marker_len)
-
-    # If exact match fails, split and search for both parts
-    query_prefix = "Query: "
-    query_prefix_ids = tokenizer(query_prefix, add_special_tokens=False, add_prefix_space=False).input_ids
-    query_text_ids = tokenizer(query_text, add_special_tokens=False, add_prefix_space=False).input_ids
-    prefix_len = len(query_prefix_ids)
+    # Tokenize the markers
+    query_prefix = "Query:"
+    query_suffix = "Correct tool_id:"
     
-    for i in range(n - prefix_len + 1):
-        if ids_list[i : i + prefix_len] == query_prefix_ids:
-            # Found "Query: ", now verify the following text matches
-            end_idx = i + prefix_len + len(query_text_ids)
-            if end_idx <= n and ids_list[i + prefix_len : end_idx] == query_text_ids:
-                return (i, end_idx)
+    query_prefix_ids = tokenizer(query_prefix, add_special_tokens=False).input_ids
+    query_suffix_ids = tokenizer(query_suffix, add_special_tokens=False).input_ids
     
-    # Last fallback: search backward from the end for "Query: "
-    for i in range(n - 1, -1, -1):
-        if ids_list[i : i + prefix_len] == query_prefix_ids:
-            return (i, min(i + marker_len, n))
+    ids_list = input_ids.tolist()
+    n = len(ids_list)
     
-    # Emergency fallback: return a safe empty span
-    return (0, 0)
+    # Find "Query:" in the token stream
+    query_prefix_len = len(query_prefix_ids)
+    query_start = None
+    
+    for i in range(n - query_prefix_len + 1):
+        if ids_list[i : i + query_prefix_len] == query_prefix_ids:
+            # Found "Query:", start from the next token
+            query_start = i + query_prefix_len
+            break
+    
+    if query_start is None:
+        print(f"DEBUG: Could not find 'Query:' marker in input")
+        return (0, 0)
+    
+    # Find "Correct tool_id:" to identify where query ends
+    query_suffix_len = len(query_suffix_ids)
+    query_end = None
+    
+    for i in range(query_start, n - query_suffix_len + 1):
+        if ids_list[i : i + query_suffix_len] == query_suffix_ids:
+            query_end = i
+            break
+    
+    if query_end is None:
+        # Fallback: assume query goes to end of sequence
+        query_end = n
+    
+    # Skip leading spaces/newlines at the start of the query
+    while query_start < query_end and ids_list[query_start] in [tokenizer.encode(" ")[0], tokenizer.encode("\n")[0], tokenizer.encode(" \n")[0]]:
+        query_start += 1
+    
+    # Skip trailing spaces/newlines at the end of the query
+    while query_end > query_start and ids_list[query_end - 1] in [tokenizer.encode(" ")[0], tokenizer.encode("\n")[0], tokenizer.encode(" \n")[0]]:
+        query_end -= 1
+    
+    return (query_start, query_end) if query_start < query_end else (0, 0)
     
     
 
