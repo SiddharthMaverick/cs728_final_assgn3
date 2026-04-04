@@ -29,34 +29,61 @@ def seed_all(seed):
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
-def query_to_docs_attention(attentions, query_span, doc_spans):
+def query_to_docs_attention(attentions, query_span, doc_spans, seq_len=None):
     """
     attentions: tuple(num_layers) of [1, heads, N, N]
     query_span: (start, end)
     doc_spans: list of (start, end)
+    seq_len: actual sequence length (for bounds checking)
     """
-    doc_scores = torch.zeros(len(doc_spans), device=attentions[0].device)
+    device = attentions[0].device
+    seq_len = attentions[0].shape[-1]  # Get actual sequence length from attention matrix
+    
+    doc_scores = torch.zeros(len(doc_spans), device=device)
     
     # TODO 1: implement to get final query to doc attention stored in doc_scores
     q_start, q_end = query_span
     num_layers = len(attentions)
-
-    device = attentions[0].device
+    
+    # Bounds checking - clamp to valid range
+    q_start = max(0, min(q_start, seq_len - 1))
+    q_end = max(q_start + 1, min(q_end, seq_len))
+    
+    # Clamp doc spans to valid ranges
+    valid_doc_spans = []
+    for d_start, d_end in doc_spans:
+        d_start = max(0, min(d_start, seq_len - 1))
+        d_end = max(d_start + 1, min(d_end, seq_len))
+        valid_doc_spans.append((d_start, d_end))
+    
     doc_lengths = torch.tensor(
-        [end - start for start, end in doc_spans], device=device
+        [end - start for start, end in valid_doc_spans], device=device
     ).clamp(min=1.0)
     
-    for layer_attention in attentions:
+    for layer_idx, layer_attention in enumerate(attentions):
         # layer_attention: [1, heads, N, N]  -> average over heads -> [N, N]
-        avg_attn   = layer_attention[0].mean(dim=0)
-        query_attn = avg_attn[q_start:q_end, :]          # [q_len, N]
-
-        for doc_idx, (d_start, d_end) in enumerate(doc_spans):
-            score = query_attn[:, d_start:d_end].sum()
-            doc_scores[doc_idx] += score
-
-    doc_scores = doc_scores / num_layers   # average over layers
+        avg_attn = layer_attention[0].mean(dim=0)  # [N, N]
+        
+        # Extract query attention: from query tokens to all positions
+        if q_start < q_end and q_end <= seq_len:
+            query_attn = avg_attn[q_start:q_end, :]  # [q_len, N]
+        else:
+            continue  # Skip if query span is invalid
+        
+        # Sum attention from query to each document
+        for doc_idx, (d_start, d_end) in enumerate(valid_doc_spans):
+            if d_start < d_end and d_end <= seq_len:
+                # Sum all attention weights from query tokens to this document's tokens
+                score = query_attn[:, d_start:d_end].sum()
+                doc_scores[doc_idx] += score
+    
+    # Normalize by number of layers and document length
+    doc_scores = doc_scores / max(num_layers, 1)   # average over layers
     doc_scores = doc_scores / doc_lengths  # normalise by doc length
+    
+    # Handle any NaN or Inf values
+    doc_scores = torch.where(torch.isnan(doc_scores) | torch.isinf(doc_scores), 
+                            torch.zeros_like(doc_scores), doc_scores)
     
     return doc_scores
 
@@ -124,20 +151,37 @@ def get_query_span(input_ids, tokenizer, question):
     # TODO 3: Query span
     """
     Identify the token span corresponding to the query.
-    Note: you are free to add/remove args in this function
+    Tries multiple strategies to find the query in the input.
     """
+    ids = input_ids.tolist()
+    seq_len = len(ids)
+    
+    # Strategy 1: Find exact match of full query prompt
     query_prompt = f"Query: {question}\nCorrect tool_id:"
     query_tokens = tokenizer(query_prompt, add_special_tokens=False).input_ids
     query_len = len(query_tokens)
-    ids = input_ids.tolist()
-
-    # Search from the end since query is near the end of the prompt
-    for i in range(len(ids) - query_len, -1, -1):
-        if ids[i : i + query_len] == query_tokens:
+    
+    # Search from the end since query is near the end
+    for i in range(min(seq_len - query_len + 1, seq_len), max(0, seq_len - 500), -1):
+        if i >= 0 and i + query_len <= seq_len and ids[i : i + query_len] == query_tokens:
             return (i, i + query_len)
-
-    # Fallback: just use the tail
-    return (len(ids) - query_len, len(ids))
+    
+    # Strategy 2: Find "Query:" token
+    query_start_tokens = tokenizer("Query:", add_special_tokens=False).input_ids
+    for i in range(seq_len - 10, max(0, seq_len - 200), -1):
+        if i >= 0 and i + len(query_start_tokens) <= seq_len:
+            if ids[i : i + len(query_start_tokens)] == query_start_tokens:
+                # Search for "Correct tool_id:" after this
+                end_tokens = tokenizer("Correct tool_id:", add_special_tokens=False).input_ids
+                for j in range(i + len(query_start_tokens), min(seq_len, i + 100)):
+                    if j + len(end_tokens) <= seq_len:
+                        if ids[j : j + len(end_tokens)] == end_tokens:
+                            return (i, j + len(end_tokens))
+                # If end not found, use query start to end of sequence
+                return (i, seq_len)
+    
+    # Strategy 3: Fallback - use last 50 tokens (query should be there)
+    return (max(0, seq_len - 50), seq_len)
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--seed', type=int, default=64)
@@ -182,6 +226,11 @@ if __name__ == '__main__':
     total = 0
     
     print("[STARTING] Processing test queries...\n")
+    print("Critical fixes applied:")
+    print("  ✓ Bounds checking for query and doc spans")
+    print("  ✓ Improved query span detection (3-strategy fallback)")
+    print("  ✓ Handling of NaN/Inf values in attention scores")
+    print("  ✓ Sequence length validation\n")
     
     for qix in tqdm(range(len(test_queries))):
         sample =  test_queries[qix]
@@ -240,8 +289,12 @@ if __name__ == '__main__':
 
         # Verify doc_scores are reasonable
         if args.debug and qix < 3:
-            print(f"  [QIX {qix}] doc_scores range: [{doc_scores.min():.4f}, {doc_scores.max():.4f}]")
-            print(f"  [QIX {qix}] gold_tool_id: {gold_tool_id}, total tools: {len(item_spans)}")
+            prompt_len = inputs.input_ids.shape[1]
+            print(f"  [QIX {qix}] Prompt len: {prompt_len}, Query span: {query_span}")
+            print(f"  [QIX {qix}] First doc span: {item_spans[0]}, Last doc span: {item_spans[-1]}")
+            print(f"  [QIX {qix}] doc_scores range: [{doc_scores.min():.6f}, {doc_scores.max():.6f}]")
+            print(f"  [QIX {qix}] gold_tool_id: {gold_tool_id}/{len(item_spans)}")
+            print(f"  [QIX {qix}] Top 3 scores: {torch.topk(doc_scores, min(3, len(doc_scores)))[0]}")
 
         # TODO: find gold_rank- rank of gold tool in doc_scores
         # TODO: find gold_score - score of gold tool
