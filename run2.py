@@ -36,7 +36,8 @@ def query_to_docs_attention(attentions, query_span, doc_spans):
     query_span: (start, end)
     doc_spans: list of (start, end)
     """
-    doc_scores = torch.zeros(len(doc_spans), device=attentions[0].device)
+    device = attentions[0].device
+    doc_scores = torch.zeros(len(doc_spans), device=device)
     
     # TODO 1: implement to get final query to doc attention stored in doc_scores
     query_start, query_end = query_span
@@ -49,7 +50,7 @@ def query_to_docs_attention(attentions, query_span, doc_spans):
     doc_lengths = torch.tensor(
         [max(end - start, 1) for start, end in doc_spans],
         dtype=torch.float32,
-        device=attentions[0].device,
+        device=device,
     )
 
     for layer_attn in attentions:
@@ -87,7 +88,12 @@ def analyze_gold_attention(result, save_path="plot2/gold_attention_plot.png"):
     df["gold_score"] = df["gold_score"].astype(float)
 
     # Calculate both mean AND standard deviation
-    grouped = df.groupby("gold_position")["gold_score"].agg(["mean", "std"]).reset_index()
+    grouped = (
+        df.groupby("gold_position")["gold_score"]
+        .agg(["mean", "std"])
+        .reset_index()
+    )
+    grouped["std"] = grouped["std"].fillna(0)
 
     plt.figure(figsize=(10, 6))
 
@@ -133,24 +139,18 @@ def analyze_gold_attention(result, save_path="plot2/gold_attention_plot.png"):
         zorder=3
     )
 
-    # 5. Typography and Axis Formatting
     plt.xlabel("Gold Tool Position in Prompt", fontsize=12, fontweight="bold", labelpad=10)
-    plt.ylabel("Attention Score", fontsize=12, fontweight="bold", labelpad=10)
+    plt.ylabel("Attention Score",              fontsize=12, fontweight="bold", labelpad=10)
     plt.title("Gold Tool Attention vs. Prompt Position", fontsize=14, pad=15)
 
-    # Force the Y-axis to start at 0, and format tiny numbers with scientific notation
     plt.ylim(bottom=0, top=0.003)
     plt.gca().ticklabel_format(style="sci", axis="y", scilimits=(-3, 3))
-
-    # Clean up legend
     plt.legend(frameon=True, facecolor="white", framealpha=0.9, edgecolor="lightgray")
-
     plt.tight_layout()
 
-    # 6. Defensive saving: ensure the directory exists and save at a higher resolution
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
     plt.savefig(save_path, dpi=300, bbox_inches="tight")
     plt.close()
+    print(f"Plot saved to {save_path}")
     
 import inspect
 
@@ -280,7 +280,8 @@ if __name__ == '__main__':
 
 
         with torch.no_grad():
-            attentions = model(**inputs).attentions
+            outputs    = model(**inputs, output_attentions=True)
+            attentions = outputs.attentions
             '''
                 attentions - tuple of length = # layers
                 attentions[0].shape - [1, h, N, N] : first layer's attention matrix for h heads
