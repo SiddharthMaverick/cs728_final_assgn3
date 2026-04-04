@@ -2,7 +2,7 @@ import json
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch
 import os 
-os.environ["TRANSFORMERS_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1" # remove this line when downloading fresh
 import numpy as np
 import pandas as pd
 
@@ -12,12 +12,10 @@ def load_model_tokenizer(model_name, device, dtype = torch.float32):
     tokenizer = AutoTokenizer.from_pretrained(model_name, local_files_only = True)
     tokenizer.pad_token_id = tokenizer.eos_token_id
     model = AutoModelForCausalLM.from_pretrained(model_name, 
-                                                dtype=dtype, 
-                                                local_files_only=False,
-                                                attn_implementation='eager',  # Required to use output_attentions
+                                                output_attentions = True,
+                                                dtype=dtype,  
+                                                local_files_only = True, # set True when the model is already downloaded
                                                 )
-    # Configure model to output attentions
-    model.config.output_attentions = True
     model.to(device)
     model.eval()
     return tokenizer, model
