@@ -7,7 +7,6 @@ Goal:
 '''
 import gc
 import os
-#os.environ["TRANSFORMERS_OFFLINE"] = "1" # remove this line when downloading fresh
 import argparse
 import json 
 import time
@@ -17,7 +16,6 @@ import torch
 import random
 import numpy as np
 import matplotlib.pyplot as plt
-import os
 from utils import load_model_tokenizer, PromptUtils, get_queries_and_items
 
 # -------------------------
@@ -94,7 +92,6 @@ def analyze_gold_attention(result, save_path="plot2/gold_attention_plot.png"):
         grouped["gold_position"], lower_bound, upper_bound,
         color="crimson", alpha=0.2, label="+/-1 Std Dev", zorder=2,
     )
-
     plt.plot(
         grouped["gold_position"], grouped["mean"],
         color="crimson", linewidth=2.5, marker="o",
@@ -108,9 +105,8 @@ def analyze_gold_attention(result, save_path="plot2/gold_attention_plot.png"):
 
     max_score = df["gold_score"].max()
     min_score = df["gold_score"].min()
-    y_pad     = (max_score - min_score) * 0.1 if max_score > min_score else max_score * 0.1
+    y_pad = (max_score - min_score) * 0.1 if max_score > min_score else max_score * 0.1
     plt.ylim(bottom=max(0, min_score - y_pad), top=max_score + y_pad)
-
     if max_score < 0.01:
         plt.gca().ticklabel_format(style="sci", axis="y", scilimits=(-3, 3))
 
@@ -123,55 +119,40 @@ def analyze_gold_attention(result, save_path="plot2/gold_attention_plot.png"):
 
 def get_query_span(input_ids, tokenizer, query_text):
     """
-    Identify the token span corresponding to the query in the prompt.
-
-    ROOT CAUSE FIX: tokenizer.decode() on Llama-3 prompts returns '<unk>'
-    because the prompt contains special tokens (like <|start_header_id|>)
-    that decode incorrectly. So we NEVER call tokenizer.decode().
-
-    Instead we directly tokenize the known strings we are looking for and
-    do a sliding-window search over the raw token id sequence.
-
-    The prompt always ends with:
-        ... "Query: {query_text}\nCorrect tool_id:" <asst_header_tokens>
-
-    So we search for the token ids of "Query: {query_text}" directly.
+    Find token span for the query.
+    NEVER use tokenizer.decode() — it returns <unk> for Llama-3 prompts
+    containing special tokens. Search token IDs directly instead.
     """
     ids_list = input_ids.tolist()
     n = len(ids_list)
 
-    # ── Strategy 1: search for "Query: {query_text}" token ids ──────────────
-    query_prefix_str = f"Query: {query_text}"
-    query_prefix_ids = tokenizer(query_prefix_str, add_special_tokens=False).input_ids
+    # Strategy 1: search for "Query: {query_text}" token ids
+    query_prefix_ids = tokenizer(f"Query: {query_text}", add_special_tokens=False).input_ids
     qp_len = len(query_prefix_ids)
-
     if qp_len > 0:
         for i in range(n - qp_len + 1):
             if ids_list[i: i + qp_len] == query_prefix_ids:
                 return (i, i + qp_len)
 
-    # ── Strategy 2: search for just the query text alone ────────────────────
+    # Strategy 2: search for just the query text
     query_only_ids = tokenizer(query_text, add_special_tokens=False).input_ids
     qo_len = len(query_only_ids)
-
     if qo_len > 0:
         for i in range(n - qo_len + 1):
             if ids_list[i: i + qo_len] == query_only_ids:
                 return (i, i + qo_len)
 
-    # ── Strategy 3: search for "Query:" token ids, then take next qo_len ────
+    # Strategy 3: find "Query:" label, then take next qo_len tokens
     query_label_ids = tokenizer("Query:", add_special_tokens=False).input_ids
     ql_len = len(query_label_ids)
-
     for i in range(n - ql_len + 1):
         if ids_list[i: i + ql_len] == query_label_ids:
             end = min(i + ql_len + max(qo_len, 1), n)
             return (i, end)
 
-    # ── Strategy 4: last resort – tail of sequence ──────────────────────────
+    # Strategy 4: last resort
     if qo_len > 0:
         return (max(0, n - qo_len), n)
-
     return (0, 0)
 
 
@@ -191,6 +172,17 @@ if __name__ == '__main__':
     tokenizer, model = load_model_tokenizer(
         model_name=model_name, device=device, dtype=torch.float16
     )
+
+    # -----------------------------------------------------------------------
+    # CRITICAL FIX: output_attentions=True passed to from_pretrained() is
+    # silently ignored by newer transformers (it's not a valid from_pretrained
+    # kwarg). The warning in the log confirms this:
+    #   "generation flags are not valid and may be ignored: ['output_attentions']"
+    # We must set it on the config explicitly so the forward pass returns
+    # real attention weights instead of zeros/None.
+    # -----------------------------------------------------------------------
+    model.config.output_attentions = True
+
     num_heads            = model.config.num_attention_heads
     num_layers           = model.config.num_hidden_layers
     d                    = getattr(model.config, "head_dim",
@@ -203,6 +195,7 @@ if __name__ == '__main__':
     print("---- debug print start ----")
     print(f"seed: {args.seed}, model: {model_name}")
     print("model.config._attn_implementation: ", model.config._attn_implementation)
+    print("model.config.output_attentions:     ", model.config.output_attentions)
 
     df_data     = []
     avg_latency = []
@@ -231,7 +224,7 @@ if __name__ == '__main__':
             tokenizer=tokenizer, 
             doc_ids=shuffled_keys, 
             dict_all_docs=tools,
-            )
+        )
         item_spans     = putils.doc_spans
         doc_lengths    = putils.doc_lengths
         map_docname_id = putils.dict_doc_name_id
@@ -247,22 +240,27 @@ if __name__ == '__main__':
 
         if args.debug and qix < 1:
             print("====== PROMPT DEBUG ======")
-            print("RAW PROMPT (first 500 chars):")
-            print(repr(prompt[:500]))
-            print("\nFIRST 30 TOKEN IDS:")
-            print(inputs.input_ids[0][:30].tolist())
-            print("\n'Query: <question>' tokenized:")
-            test_ids = tokenizer(f"Query: {question}", add_special_tokens=False).input_ids
-            print(test_ids[:20])
+            print("RAW PROMPT (first 300 chars):", repr(prompt[:300]))
+            print("First 30 token IDs:", inputs.input_ids[0][:30].tolist())
+            qids = tokenizer(f"Query: {question}", add_special_tokens=False).input_ids
+            print("'Query: <q>' token IDs (first 10):", qids[:10])
             print("====== END DEBUG =======")
 
         with torch.no_grad():
-            outputs    = model(**inputs)
+            # CRITICAL FIX: pass output_attentions=True explicitly in the
+            # forward call. Relying on model.config alone is not sufficient
+            # for all transformers versions.
+            outputs    = model(**inputs, output_attentions=True)
             attentions = outputs.attentions
             
             if attentions is None:
-                print(f"ERROR: Model did not return attentions for query {qix}")
+                print(f"ERROR: attentions is None for query {qix}")
                 continue
+
+            # Sanity check on first query
+            if qix == 0:
+                nonzero = sum(a.abs().sum().item() > 0 for a in attentions)
+                print(f"[Sanity] Non-zero attention layers: {nonzero}/{len(attentions)}")
             '''
                 attentions - tuple of length = # layers
                 attentions[0].shape - [1, h, N, N]
@@ -282,6 +280,10 @@ if __name__ == '__main__':
 
         doc_scores = query_to_docs_attention(attentions, query_span, item_spans)
         
+        if doc_scores.max().item() < 1e-9:
+            if qix < 5:
+                print(f"WARNING: all-zero scores at query {qix}, span={query_span}")
+
         ranked_docs = torch.argsort(doc_scores, descending=True)
         gold_rank   = (ranked_docs == gold_tool_id).nonzero(as_tuple=True)[0].item()
         gold_score  = doc_scores[gold_tool_id].item()
