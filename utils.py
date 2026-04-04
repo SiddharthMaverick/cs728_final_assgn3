@@ -13,14 +13,14 @@ def load_model_tokenizer(model_name, device, dtype = torch.float32):
     
     # CRITICAL: Set padding token and ensure special tokens are preserved
     if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token_id
+        tokenizer.pad_token = tokenizer.eos_token  # Use token, not ID
     
-    # Add any missing special tokens to tokenizer
     tokenizer.padding_side = "left"
     
-    print(f"[TOKENIZER DEBUG] eos_token_id: {tokenizer.eos_token_id}")
-    print(f"[TOKENIZER DEBUG] pad_token_id: {tokenizer.pad_token_id}")
-    print(f"[TOKENIZER DEBUG] bos_token_id: {tokenizer.bos_token_id if hasattr(tokenizer, 'bos_token_id') else 'N/A'}")
+    print(f"\n[TOKENIZER DEBUG]")
+    print(f"[TOKENIZER DEBUG] eos_token: {tokenizer.eos_token} (id: {tokenizer.eos_token_id})")
+    print(f"[TOKENIZER DEBUG] pad_token: {tokenizer.pad_token} (id: {tokenizer.pad_token_id})")
+    print(f"[TOKENIZER DEBUG] bos_token: {tokenizer.bos_token if hasattr(tokenizer, 'bos_token') else 'N/A'}")
     print(f"[TOKENIZER DEBUG] vocab_size: {len(tokenizer)}")
     
     # Test tokenizer on special tokens
@@ -28,12 +28,12 @@ def load_model_tokenizer(model_name, device, dtype = torch.float32):
     test_ids = tokenizer(test_str, add_special_tokens=False).input_ids
     print(f"[TOKENIZER DEBUG] Test tokenization of '{test_str}':")
     print(f"[TOKENIZER DEBUG] Token IDs: {test_ids}")
-    print(f"[TOKENIZER DEBUG] Decoded: {tokenizer.decode(test_ids)}")
+    print(f"[TOKENIZER DEBUG] Decoded: '{tokenizer.decode(test_ids)}'")
     
     model = AutoModelForCausalLM.from_pretrained(model_name, 
                                                 attn_implementation="eager",
                                                 dtype=dtype,  
-                                                local_files_only = True, # set True when the model is already downloaded
+                                                local_files_only = True,
                                                 output_attentions=True,
                                                 )
     model.to(device)
