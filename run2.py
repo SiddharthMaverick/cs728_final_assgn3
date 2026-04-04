@@ -43,13 +43,25 @@ def query_to_docs_attention(attentions, query_span, doc_spans):
     num_layers = len(attentions)
 
 
+    # FIX 1: average over heads first -> [q_len, N], then sum query->doc
+    # attention weights, then normalise by doc length so longer tools
+    # don't get an unfair score boost.
+    doc_lengths = torch.tensor(
+        [max(end - start, 1) for start, end in doc_spans],
+        dtype=torch.float32,
+        device=attentions[0].device,
+    )
+
     for layer_attn in attentions:
-        query_attn = layer_attn[0, :, query_start:query_end, :]
+        # layer_attn: [1, heads, N, N]
+        avg_over_heads = layer_attn[0].mean(dim=0)           # [N, N]
+        query_attn     = avg_over_heads[query_start:query_end]  # [q_len, N]
+
         for doc_idx, (doc_start, doc_end) in enumerate(doc_spans):
-            doc_attn = query_attn[:, :, doc_start:doc_end]
-            doc_scores[doc_idx] += doc_attn.mean()
-            
-    doc_scores /= num_layers
+            doc_scores[doc_idx] += query_attn[:, doc_start:doc_end].sum()
+
+    doc_scores /= num_layers   # average over layers
+    doc_scores /= doc_lengths  # normalise by doc length
     return doc_scores
 
 
@@ -142,28 +154,27 @@ def analyze_gold_attention(result, save_path="plot2/gold_attention_plot.png"):
     
 import inspect
 
-def get_query_span():
-    # TODO 3: Query span
+# FIX 2: explicit arguments instead of the fragile inspect frame-hack.
+# The original used inspect.currentframe().f_back to steal locals from the
+# caller — this breaks at different call depths and is impossible to reuse.
+def get_query_span(input_ids, tokenizer, query_text):
     """
-    Identify the token span corresponding to the query.
-    Note: you are free to add/remove args in this function
+    Identify the token span corresponding to the query in the prompt.
+    Searches for the sub-sequence "Query: <query_text>" in the token
+    stream and returns (start, end)  [end is exclusive].
     """
-    frame = inspect.currentframe().f_back
-    question = frame.f_locals["question"]
-    putils = frame.f_locals["putils"]
-    tokenizer = frame.f_locals["tokenizer"]
+    query_marker = f"Query: {query_text}"
+    marker_ids   = tokenizer(query_marker, add_special_tokens=False).input_ids
+    marker_len   = len(marker_ids)
+    ids_list     = input_ids.tolist()
+    n            = len(ids_list)
 
-    query_prefix = (
-        putils.prompt_prefix
-        + putils.all_docs_info_string
-        + putils.prompt_seperator
-        + putils.add_text1
-        + putils.prompt_seperator
-        + "Query: "
-    )
-    query_start = len(tokenizer(query_prefix, add_special_tokens=False).input_ids)
-    query_length = len(tokenizer(question, add_special_tokens=False).input_ids)
-    return (query_start, query_start + query_length)
+    for i in range(n - marker_len + 1):
+        if ids_list[i : i + marker_len] == marker_ids:
+            return (i, i + marker_len)
+
+    # Fallback: assume the query sits at the very end of the sequence
+    return (n - marker_len, n)
     
     
 
@@ -199,6 +210,14 @@ if __name__ == '__main__':
     count = 0
     start_time = time.time()
     results = []
+
+    # FIX 4: counters must be initialised OUTSIDE the loop —
+    # the original reset them conditionally on qix==0 which is
+    # fragile and makes them unavailable if the loop errors mid-way.
+    correct_at_1 = 0
+    correct_at_5 = 0
+    total = 0
+
     for qix in tqdm(range(len(test_queries))):
         sample =  test_queries[qix]
         qid = sample["qid"]
@@ -247,14 +266,14 @@ if __name__ == '__main__':
                 attentions[0].shape - [1, h, N, N] : first layer's attention matrix for h heads
             '''
         
-        query_span = get_query_span() 
+        # FIX 2 & 3: call get_query_span once with explicit args; remove the
+        # redundant second call that was computing everything twice.
+        query_span = get_query_span(
+            input_ids=inputs.input_ids[0].cpu(),
+            tokenizer=tokenizer,
+            query_text=question,
+        )
 
-        doc_scores = query_to_docs_attention(attentions, query_span, item_spans)
-
-        # TODO: find gold_rank- rank of gold tool in doc_scores
-        # TODO: find gold_score - score of gold tool
-        
-        query_span = get_query_span()
         doc_scores = query_to_docs_attention(attentions, query_span, item_spans)
         
         ranked_docs = torch.argsort(doc_scores, descending=True)
@@ -270,22 +289,19 @@ if __name__ == '__main__':
             "gold_rank": gold_rank
         })
 
-        # TODO: calucalte recall@1, recall@5 metric and print at end of loop
-        if qix == 0:
-            correct_at_1 = 0
-            correct_at_5 = 0
-
         if gold_rank == 0:
             correct_at_1 += 1
         if gold_rank < 5:
             correct_at_5 += 1
+        total += 1
 
-        if qix == len(test_queries) - 1:
-            recall_at_1 = correct_at_1 / len(test_queries)
-            recall_at_5 = correct_at_5 / len(test_queries)
-            print(f"Recall@1: {recall_at_1:.4f}")
-            print(f"Recall@5: {recall_at_5:.4f}")
+        del attentions
+        torch.cuda.empty_cache()
+
+    # FIX 4: print recall once after the loop completes
+    recall_at_1 = correct_at_1 / total
+    recall_at_5 = correct_at_5 / total
+    print(f"Recall@1: {recall_at_1:.4f}")
+    print(f"Recall@5: {recall_at_5:.4f}")
 
     analyze_gold_attention(results)
-
-    
