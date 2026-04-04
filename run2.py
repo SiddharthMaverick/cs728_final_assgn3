@@ -7,7 +7,7 @@ Goal:
 '''
 import gc
 import os
-#os.environ["TRANSFORMERS_OFFLINE"] = "1" # remove this line when downloading fresh
+os.environ["TRANSFORMERS_OFFLINE"] = "1" # remove this line when downloading fresh
 import argparse
 import json 
 import time
@@ -17,6 +17,7 @@ import torch
 import random
 import numpy as np
 import matplotlib.pyplot as plt
+import os
 from utils import load_model_tokenizer, PromptUtils, get_queries_and_items
 
 # -------------------------
@@ -38,31 +39,23 @@ def query_to_docs_attention(attentions, query_span, doc_spans):
     doc_scores = torch.zeros(len(doc_spans), device=attentions[0].device)
     
     # TODO 1: implement to get final query to doc attention stored in doc_scores
-    
+    doc_scores = torch.zeros(len(doc_spans), device=attentions[0].device)
     q_start, q_end = query_span
-
-    device = attentions[0].device
-    doc_lengths = torch.tensor(
-        [end - start for start, end in doc_spans], device=device
-    ).clamp(min=1.0)
-    
     num_layers = len(attentions)
-    
-    for layer_attention in attentions:
-        # layer_attention: [1, heads, N, N]  -> average over heads -> [N, N]
-        avg_attn   = layer_attention[0].mean(dim=0)
-        query_attn = avg_attn[q_start:q_end, :]          # [q_len, N]
 
-        for doc_idx, (d_start, d_end) in enumerate(doc_spans):
-            score = query_attn[:, d_start:d_end].sum()
-            doc_scores[doc_idx] += score
+    for layer_attn in attentions:
+        # layer_attn: [1, num_heads, N, N]
+        # Average across heads -> [N, N]
+        avg_attn = layer_attn[0].mean(dim=0)
 
-    doc_scores = doc_scores / num_layers   # average over layers
-    doc_scores = doc_scores / doc_lengths  # normalise by doc length
-    
-    
-    
+        for i, (d_start, d_end) in enumerate(doc_spans):
+            # Mean attention from each query token to each doc token
+            score = avg_attn[q_start:q_end, d_start:d_end].mean()
+            doc_scores[i] += score
+
+    doc_scores /= num_layers
     return doc_scores
+
 
 
 def analyze_gold_attention(result, save_path="plot2/gold_attention_plot.png"):
@@ -79,74 +72,56 @@ def analyze_gold_attention(result, save_path="plot2/gold_attention_plot.png"):
         - Save the plot as an image file under folder plot2.
         - You are free to choose how to aggregate and visualize the data.
     """
-    
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    import os
+    os.makedirs("plot2", exist_ok=True)
 
-    positions = np.array([r["gold_position"] for r in result])
-    scores    = np.array([r["gold_score"]    for r in result])
-    ranks     = np.array([r["gold_rank"]     for r in result])
+    positions = [r["gold_position"] for r in result]
+    scores    = [float(r["gold_score"]) for r in result]
+    ranks     = [r["gold_rank"] for r in result]
 
-    unique_positions    = np.unique(positions)
-    mean_score_per_pos  = []
-    std_score_per_pos   = []
-    mean_rank_per_pos   = []
+    df = pd.DataFrame({"position": positions, "score": scores, "rank": ranks})
 
-    for pos in unique_positions:
-        mask = positions == pos
-        mean_score_per_pos.append(scores[mask].mean())
-        std_score_per_pos.append(scores[mask].std())
-        mean_rank_per_pos.append(ranks[mask].mean())
+    # Bin positions (each position = one slot among ~100 tools)
+    grouped = df.groupby("position").agg(
+        mean_score=("score", "mean"),
+        count=("score", "count")
+    ).reset_index()
 
-    mean_score_per_pos = np.array(mean_score_per_pos)
-    std_score_per_pos  = np.array(std_score_per_pos)
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-    fig.suptitle("Attention and Rank of Gold Tool vs Position in Prompt", fontsize=14)
+    # Plot 1: Mean attention score vs gold tool position
+    axes[0].scatter(grouped["position"], grouped["mean_score"],
+                    alpha=0.7, s=grouped["count"] * 2, color="steelblue", edgecolors="k", linewidths=0.4)
+    axes[0].set_xlabel("Position of Gold Tool in Prompt")
+    axes[0].set_ylabel("Mean Attention Score")
+    axes[0].set_title("Gold Tool Attention Score vs Position\n(bubble size ∝ query count)")
 
-    # plot 1: mean attention score vs position
-    ax = axes[0]
-    ax.plot(unique_positions, mean_score_per_pos, color="steelblue", lw=2)
-    ax.fill_between(
-        unique_positions,
-        mean_score_per_pos - std_score_per_pos,
-        mean_score_per_pos + std_score_per_pos,
-        color="steelblue", alpha=0.3, label="Std Dev"
-    )
-    ax.set_xlabel("Position of Gold Tool in Prompt", fontsize=12)
-    ax.set_ylabel("Mean Attention Score to Gold Tool", fontsize=12)
-    ax.set_title("Attention Score vs Position", fontsize=12)
-    ax.legend()
-    ax.grid(True, linestyle="--", alpha=0.5)
+    # Add a smoothed trend line
+    sorted_pos = grouped["position"].values
+    sorted_scores = grouped["mean_score"].values
+    axes[0].plot(sorted_pos, sorted_scores, color="salmon", linewidth=1.5, alpha=0.8)
 
-    # plot 2: mean rank vs position
-    ax = axes[1]
-    ax.plot(unique_positions, mean_rank_per_pos, color="coral", lw=2)
-    ax.set_xlabel("Position of Gold Tool in Prompt", fontsize=12)
-    ax.set_ylabel("Mean Rank of Gold Tool", fontsize=12)
-    ax.set_title("Rank vs Position", fontsize=12)
-    ax.grid(True, linestyle="--", alpha=0.5)
-
-    # plot 3: rank distribution
-    ax = axes[2]
-    ax.hist(ranks, bins=50, color="mediumseagreen", edgecolor="white")
-    ax.set_xlabel("Gold Rank")
-    ax.set_ylabel("Count")
-    ax.set_title("Distribution of Gold Tool Rank")
-    ax.grid(True, linestyle="--", alpha=0.4)
+    # Plot 2: Histogram of gold ranks to show retrieval quality
+    axes[1].hist(ranks, bins=30, color="mediumseagreen", edgecolor="k", alpha=0.8)
+    axes[1].set_xlabel("Rank of Gold Tool")
+    axes[1].set_ylabel("Number of Queries")
+    axes[1].set_title("Distribution of Gold Tool Ranks")
+    axes[1].axvline(x=0.5, color="red", linestyle="--", label="Rank 1 boundary")
+    axes[1].axvline(x=4.5, color="orange", linestyle="--", label="Rank 5 boundary")
+    axes[1].legend()
 
     plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.savefig(save_path, dpi=150)
     plt.close()
-    print(f"[Part 2] Plot saved -> {save_path}")
-    
+    print(f"[Plot saved] {save_path}")
 
-def get_query_span(input_ids, tokenizer, query_text):
+def get_query_span(input_ids, tokenizer, question):
     # TODO 3: Query span
     """
     Identify the token span corresponding to the query.
     Note: you are free to add/remove args in this function
     """
-    query_prompt = f"Query: {query_text}\nCorrect tool_id:"
+    query_prompt = f"Query: {question}\nCorrect tool_id:"
     query_tokens = tokenizer(query_prompt, add_special_tokens=False).input_ids
     query_len = len(query_tokens)
     ids = input_ids.tolist()
@@ -158,6 +133,7 @@ def get_query_span(input_ids, tokenizer, query_text):
 
     # Fallback: just use the tail
     return (len(ids) - query_len, len(ids))
+    return None
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--seed', type=int, default=64)
@@ -191,9 +167,6 @@ if __name__ == '__main__':
     count = 0
     start_time = time.time()
     results = []
-    correct_at_1 = 0
-    correct_at_5 = 0
-    total = 0
     for qix in tqdm(range(len(test_queries))):
         sample =  test_queries[qix]
         qid = sample["qid"]
@@ -242,20 +215,19 @@ if __name__ == '__main__':
                 attentions[0].shape - [1, h, N, N] : first layer's attention matrix for h heads
             '''
         
-        query_span = get_query_span(
-            input_ids=inputs.input_ids[0].cpu(),
-            tokenizer=tokenizer,
-            query_text=question,
-        )
+        query_span = get_query_span() 
 
         doc_scores = query_to_docs_attention(attentions, query_span, item_spans)
 
         # TODO: find gold_rank- rank of gold tool in doc_scores
         # TODO: find gold_score - score of gold tool
-        ranked_doc_indices = torch.argsort(doc_scores, descending=True).cpu().tolist()
-        gold_rank = ranked_doc_indices.index(gold_tool_id)
+        # Rank all docs by score (descending)
+        ranked_docs = torch.argsort(doc_scores, descending=True)
+
+        # Rank of the gold tool (0-indexed)
+        gold_rank  = (ranked_docs == gold_tool_id).nonzero(as_tuple=True)[0].item()
         gold_score = doc_scores[gold_tool_id].item()
-        
+
         results.append({
             "qid": qid,
             "gold_position": gold_tool_id,
@@ -263,21 +235,14 @@ if __name__ == '__main__':
             "gold_rank": gold_rank
         })
 
-        # TODO: calucalte recall@1, recall@5 metric and print at end of loop
-        # recall@1 and recall@5
-        if gold_rank == 0:
-            correct_at_1 += 1
-        if gold_rank < 5:
-            correct_at_5 += 1
+        correct_at_1 += int(gold_rank == 0)
+        correct_at_5 += int(gold_rank < 5)
         total += 1
 
-        del attentions
-        torch.cuda.empty_cache()
+        # TODO: calucalte recall@1, recall@5 metric and print at end of loop
+        print(f"\nRecall@1: {correct_at_1 / total:.4f}")
+        print(f"Recall@5: {correct_at_5 / total:.4f}")
+        analyze_gold_attention(results)
 
-    recall_at_1 = correct_at_1 / total
-    recall_at_5 = correct_at_5 / total
-    print(f"Recall@1: {recall_at_1:.4f}, Recall@5: {recall_at_5:.4f}")
-
-    analyze_gold_attention(results)
 
     
