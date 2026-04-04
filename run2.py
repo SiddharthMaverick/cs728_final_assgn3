@@ -7,7 +7,7 @@ Goal:
 '''
 import gc
 import os
-#os.environ["TRANSFORMERS_OFFLINE"] = "1"
+#os.environ["TRANSFORMERS_OFFLINE"] = "1" # remove this line when downloading fresh
 import argparse
 import json 
 import time
@@ -17,7 +17,6 @@ import torch
 import random
 import numpy as np
 import matplotlib.pyplot as plt
-import os
 from utils import load_model_tokenizer, PromptUtils, get_queries_and_items
 
 # -------------------------
@@ -35,25 +34,20 @@ def query_to_docs_attention(attentions, query_span, doc_spans):
     attentions: tuple(num_layers) of [1, heads, N, N]
     query_span: (start, end)
     doc_spans: list of (start, end)
-
-    Strategy:
-        Average attention across all heads within each layer,
-        then sum query-to-doc attention, then average over layers,
-        then normalise by document length.
     """
     doc_scores = torch.zeros(len(doc_spans), device=attentions[0].device)
-
+    
     # TODO 1: implement to get final query to doc attention stored in doc_scores
+    
     q_start, q_end = query_span
 
     device = attentions[0].device
-
     doc_lengths = torch.tensor(
         [end - start for start, end in doc_spans], device=device
     ).clamp(min=1.0)
-
+    
     num_layers = len(attentions)
-
+    
     for layer_attention in attentions:
         # layer_attention: [1, heads, N, N]  -> average over heads -> [N, N]
         avg_attn   = layer_attention[0].mean(dim=0)
@@ -65,7 +59,9 @@ def query_to_docs_attention(attentions, query_span, doc_spans):
 
     doc_scores = doc_scores / num_layers   # average over layers
     doc_scores = doc_scores / doc_lengths  # normalise by doc length
-
+    
+    
+    
     return doc_scores
 
 
@@ -83,6 +79,7 @@ def analyze_gold_attention(result, save_path="plot2/gold_attention_plot.png"):
         - Save the plot as an image file under folder plot2.
         - You are free to choose how to aggregate and visualize the data.
     """
+    
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
     positions = np.array([r["gold_position"] for r in result])
@@ -141,28 +138,26 @@ def analyze_gold_attention(result, save_path="plot2/gold_attention_plot.png"):
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"[Part 2] Plot saved -> {save_path}")
-
+    
 
 def get_query_span(input_ids, tokenizer, query_text):
     # TODO 3: Query span
     """
     Identify the token span corresponding to the query.
-    Searches for the sub-sequence "Query: <query_text>" in the token stream
-    and returns its (start, end) span (end is exclusive).
+    Note: you are free to add/remove args in this function
     """
-    query_marker = f"text: {query_text}"
-    marker_ids   = tokenizer(query_marker, add_special_tokens=False).input_ids
-    marker_len   = len(marker_ids)
-    ids_list     = input_ids.tolist()
-    n            = len(ids_list)
+    query_prompt = f"Query: {query_text}\nCorrect tool_id:"
+    query_tokens = tokenizer(query_prompt, add_special_tokens=False).input_ids
+    query_len = len(query_tokens)
+    ids = input_ids.tolist()
 
-    for i in range(n - marker_len + 1):
-        if ids_list[i: i + marker_len] == marker_ids:
-            return (i, i + marker_len)
+    # Search from the end since query is near the end of the prompt
+    for i in range(len(ids) - query_len, -1, -1):
+        if ids[i : i + query_len] == query_tokens:
+            return (i, i + query_len)
 
-    # Fallback: assume query is at the tail of the sequence
-    return (n - marker_len, n)
-
+    # Fallback: just use the tail
+    return (len(ids) - query_len, len(ids))
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--seed', type=int, default=64)
@@ -176,14 +171,15 @@ if __name__ == '__main__':
     seed_all(seed=args.seed)
     model_name = args.model
     device = "cuda:0"
-
+    
     tokenizer, model = load_model_tokenizer(model_name=model_name, device=device, dtype=torch.float16)
     num_heads = model.config.num_attention_heads
     num_layers = model.config.num_hidden_layers
     d = getattr(model.config, "head_dim", model.config.hidden_size // model.config.num_attention_heads)
-    num_key_value_groups = num_heads // model.config.num_key_value_heads
-    softmax_scaling = d ** -0.5
+    num_key_value_groups = num_heads//model.config.num_key_value_heads
+    softmax_scaling=d**-0.5
     train_queries, test_queries, tools = get_queries_and_items()
+ 
 
     print("---- debug print start ----")
     print(f"seed: {args.seed}, model: {model_name}")
@@ -195,14 +191,12 @@ if __name__ == '__main__':
     count = 0
     start_time = time.time()
     results = []
-
     correct_at_1 = 0
     correct_at_5 = 0
     total = 0
-
     for qix in tqdm(range(len(test_queries))):
-        sample   = test_queries[qix]
-        qid      = sample["qid"]
+        sample =  test_queries[qix]
+        qid = sample["qid"]
         question = sample["text"]
         gold_tool_name = sample["gold_tool_name"]
 
@@ -214,31 +208,32 @@ if __name__ == '__main__':
         random.shuffle(shuffled_keys)
 
         putils = PromptUtils(
-            tokenizer=tokenizer,
-            doc_ids=shuffled_keys,
+            tokenizer=tokenizer, 
+            doc_ids=shuffled_keys, 
             dict_all_docs=tools,
-        )
-        item_spans     = putils.doc_spans
-        doc_lengths    = putils.doc_lengths
+            )
+        item_spans = putils.doc_spans
+        doc_lengths = putils.doc_lengths
         map_docname_id = putils.dict_doc_name_id
-        map_id_docname = {v: k for k, v in map_docname_id.items()}
-        db_lengths_pt  = torch.tensor(doc_lengths, device=device)
-
+        map_id_docname = {v:k for k, v in map_docname_id.items()}
+        db_lengths_pt = torch.tensor(doc_lengths, device=device)
+        
         gold_tool_id = map_docname_id[gold_tool_name]
 
         prompt = putils.create_prompt(query=question)
-        inputs = tokenizer(prompt, return_tensors="pt", add_special_tokens=False).to(device)
+        inputs = tokenizer(prompt, return_tensors = "pt", add_special_tokens = False).to(device)
 
         if args.debug and qix < 5:
             ip_ids = inputs.input_ids[0].cpu()
-            print("-------" * 5)
+            print("-------"*5)
             print(prompt)
-            print("-------" * 5)
+            print("-------"*5)
             print("---- doc1 ----")
             print(tokenizer.decode(ip_ids[item_spans[0][0]: item_spans[0][1]]))
             print("---- lastdoc ----")
             print(tokenizer.decode(ip_ids[item_spans[-1][0]: item_spans[-1][1]]))
-            print("-------" * 5)
+            print("-------"*5)
+
 
         with torch.no_grad():
             attentions = model(**inputs).attentions
@@ -246,7 +241,7 @@ if __name__ == '__main__':
                 attentions - tuple of length = # layers
                 attentions[0].shape - [1, h, N, N] : first layer's attention matrix for h heads
             '''
-
+        
         query_span = get_query_span(
             input_ids=inputs.input_ids[0].cpu(),
             tokenizer=tokenizer,
@@ -255,18 +250,20 @@ if __name__ == '__main__':
 
         doc_scores = query_to_docs_attention(attentions, query_span, item_spans)
 
-        # find gold_rank and gold_score
+        # TODO: find gold_rank- rank of gold tool in doc_scores
+        # TODO: find gold_score - score of gold tool
         ranked_doc_indices = torch.argsort(doc_scores, descending=True).cpu().tolist()
-        gold_rank  = ranked_doc_indices.index(gold_tool_id)
+        gold_rank = ranked_doc_indices.index(gold_tool_id)
         gold_score = doc_scores[gold_tool_id].item()
-
+        
         results.append({
-            "qid":           qid,
+            "qid": qid,
             "gold_position": gold_tool_id,
-            "gold_score":    gold_score,
-            "gold_rank":     gold_rank
+            "gold_score": gold_score,
+            "gold_rank": gold_rank
         })
 
+        # TODO: calucalte recall@1, recall@5 metric and print at end of loop
         # recall@1 and recall@5
         if gold_rank == 0:
             correct_at_1 += 1
@@ -282,3 +279,5 @@ if __name__ == '__main__':
     print(f"Recall@1: {recall_at_1:.4f}, Recall@5: {recall_at_5:.4f}")
 
     analyze_gold_attention(results)
+
+    
