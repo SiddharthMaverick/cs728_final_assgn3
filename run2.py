@@ -139,7 +139,7 @@ def analyze_gold_attention(result, save_path="plot2/gold_attention_plot.png"):
     plt.title("Gold Tool Attention vs. Prompt Position", fontsize=14, pad=15)
 
     # Force the Y-axis to start at 0, and format tiny numbers with scientific notation
-    plt.ylim(bottom=0)
+    plt.ylim(bottom=0, top=0.003)
     plt.gca().ticklabel_format(style="sci", axis="y", scilimits=(-3, 3))
 
     # Clean up legend
