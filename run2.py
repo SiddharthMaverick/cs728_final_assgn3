@@ -244,11 +244,7 @@ if __name__ == '__main__':
     recall_at_1 /= num_queries
     recall_at_5 /= num_queries
 
-    with open("results/q2/gold_attention_results.json", "w") as f:
-        json.dump(results, f, indent=4)
     
-    with open("results/q2/recall_k_results.json", "w") as f:
-        json.dump({"recall_at_1": recall_at_1, "recall_at_5": recall_at_5}, f, indent=4)
 
     print(f"Recall@1: {recall_at_1:.4f}, Recall@5: {recall_at_5:.4f}")
 
