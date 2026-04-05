@@ -182,41 +182,37 @@ if __name__ == '__main__':
             if attentions is None:
                 continue
         
+        # Get query span BEFORE running the model so we can skip invalid prompts early
         query_span = get_query_span(
-            input_ids=inputs.input_ids[0],
+            input_ids=inputs.input_ids[0].cpu(),
             tokenizer=tokenizer,
             putils=putils,
             query_text=question,
         )
 
         if query_span[0] >= query_span[1]:
-            del attentions
-            torch.cuda.empty_cache()
+            del inputs
             continue
 
+        with torch.no_grad():
+            outputs = model(**inputs, output_attentions=True)
+            
+            # --- CRITICAL MEMORY FIX ---
+            # Move the massive 9GB attention maps to CPU instantly.
+            attentions = tuple(layer_attn.cpu() for layer_attn in outputs.attentions)
+            
+            # Aggressively delete the outputs (which holds the ~1GB logits) and inputs
+            del outputs
+            del inputs
+            
+            # Force PyTorch to release the VRAM back to the GPU before the next calculation
+            import gc
+            gc.collect()
+            torch.cuda.empty_cache()
+            # ---------------------------
+
+        # doc_scores will now automatically compute on the CPU, saving your GPU!
         doc_scores = query_to_docs_attention(attentions, query_span, item_spans)
-        
-        if args.debug and qix < 3:
-            print(f"[q{qix}] span={query_span}, max_score={doc_scores.max().item():.6f}, "
-                  f"gold_score={doc_scores[gold_tool_id].item():.6f}")
-
-        ranked_docs = torch.argsort(doc_scores, descending=True)
-        gold_rank   = (ranked_docs == gold_tool_id).nonzero(as_tuple=True)[0].item()
-        gold_score  = doc_scores[gold_tool_id].item()
-        
-        results.append({
-            "qid":           qid,
-            "gold_position": gold_tool_id,
-            "gold_score":    gold_score,
-            "gold_rank":     gold_rank,
-        })
-
-        if gold_rank == 0: correct_at_1 += 1
-        if gold_rank < 5:  correct_at_5 += 1
-        total += 1
-
-        del attentions
-        torch.cuda.empty_cache()
 
     if total > 0:
         recall_at_1 = correct_at_1 / total
