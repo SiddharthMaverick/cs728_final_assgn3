@@ -219,8 +219,7 @@ if __name__ == '__main__':
 
 
         with torch.no_grad():
-            outputs    = model(**inputs, output_attentions=True)
-            attentions = outputs.attentions
+            attentions = model(**inputs).attentions
             '''
                 attentions - tuple of length = # layers
                 attentions[0].shape - [1, h, N, N] : first layer's attention matrix for h heads
@@ -271,7 +270,8 @@ if __name__ == '__main__':
             correct_at_5 += 1
         total += 1
 
-        
+        del attentions
+        torch.cuda.empty_cache()
         
         
     if total > 0:
