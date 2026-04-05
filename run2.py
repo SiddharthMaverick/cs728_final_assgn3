@@ -218,12 +218,7 @@ if __name__ == '__main__':
             print("-------"*5)
 
 
-        with torch.no_grad():
-            attentions = model(**inputs).attentions
-            '''
-                attentions - tuple of length = # layers
-                attentions[0].shape - [1, h, N, N] : first layer's attention matrix for h heads
-            '''
+        
         
         query_span = get_query_span(input_ids=inputs.input_ids[0].cpu(),putils=putils)
         
