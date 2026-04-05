@@ -1,4 +1,4 @@
-# 🔍 Tool Retrieval with LLM Attention — "Lost in the Middle" Analysis
+# 🔍 Tool Retrieval with LLM Attention 
 
 > **CS728 · Information Retrieval & NLP · IIT Bombay, Spring 2026**  
 > Model: `meta-llama/Llama-3.2-1B-Instruct` · Seed: `64` · GPU: A100 (float16)
