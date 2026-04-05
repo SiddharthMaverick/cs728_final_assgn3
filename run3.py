@@ -8,7 +8,7 @@ Goal:
 
 import json
 import os
-os.environ["TRANSFORMERS_OFFLINE"] = "1"
+#os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
 import argparse
 import time
