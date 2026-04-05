@@ -8,11 +8,10 @@ import pandas as pd
 import random
 
 def load_model_tokenizer(model_name, device, dtype=torch.float32):
-    # Added use_fast=False to try and bypass the "Total tokens: 1" bug in your server environment
+    # REMOVE local_files_only=True for the tokenizer to ensure it gets the Llama 3 version
     tokenizer = AutoTokenizer.from_pretrained(
         model_name, 
-        local_files_only=True,
-        use_fast=False  
+        # local_files_only=True,  <-- REMOVE THIS
     )
     tokenizer.pad_token_id = tokenizer.eos_token_id
     
@@ -20,7 +19,7 @@ def load_model_tokenizer(model_name, device, dtype=torch.float32):
         model_name, 
         output_attentions=True,
         dtype=dtype,  
-        local_files_only=True, # set True when the model is already downloaded
+        local_files_only=True, # Keep this True if your model weights are already downloaded
     )
     model.to(device)
     model.eval()
@@ -28,7 +27,9 @@ def load_model_tokenizer(model_name, device, dtype=torch.float32):
     # Quick sanity check for the tokenizer bug
     test_len = len(tokenizer("This is a test to see if lengths work", add_special_tokens=False).input_ids)
     if test_len <= 1:
-        print("CRITICAL WARNING: Tokenizer is mapping entire sentences to a single token. Check your local tokenizer files.")
+        print("CRITICAL WARNING: Tokenizer is STILL mapping entire sentences to a single token.")
+    else:
+        print(f"SUCCESS: Tokenizer is working! Test sentence length: {test_len} tokens.")
         
     return tokenizer, model
 
