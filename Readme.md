@@ -1,6 +1,5 @@
 # 🔍 Tool Retrieval with LLM Attention 
 
-> **CS728 · Information Retrieval & NLP · IIT Bombay, Spring 2026**  
 > Model: `meta-llama/Llama-3.2-1B-Instruct` · Seed: `64` · GPU: A100 (float16)
 
 A research-grade pipeline that benchmarks **classical and neural approaches to tool retrieval** — selecting the correct API/tool from a corpus of 100 tools given a natural language query. The project culminates in a mechanistic analysis of the **"Lost in the Middle"** phenomenon in LLMs and a **Retrieval Heads** technique that recovers a ~30× improvement in Recall@1 using just 10 specialized attention heads.
